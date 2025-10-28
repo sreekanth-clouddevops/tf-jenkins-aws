@@ -1,83 +1,56 @@
-// Jenkinsfile - Terraform pipeline with apply and destroy support
+// Jenkinsfile - Terraform pipeline supporting plan / apply / destroy
 pipeline {
   agent any
 
-  // Choose TF_DIR where your terraform files live in the repo (root = ".")
   environment {
-    TF_DIR = "${env.WORKSPACE}"           // default: repo root. set like "${env.WORKSPACE}/infra" if needed
-    // If you prefer Docker runner, set USE_DOCKER true in the job's parameters or environment
-    USE_DOCKER = "true"                 // set to "true" to use hashicorp/terraform:light
-    AWS_CREDS_ID = "aws-creds"           // Jenkins credential id for AWS (username = access key id, password = secret)
+    // Point to TF files (root by default). Use "${env.WORKSPACE}/infra" if files are in subfolder.
+    TF_DIR = "${env.WORKSPACE}"
+    USE_DOCKER = "true"                  // "true" to run Terraform in container, "false" to use system terraform
     TERRAFORM_IMAGE = "hashicorp/terraform:light"
+    AWS_CREDS_ID = "aws-creds"           // Jenkins credential id (username = AWS_ACCESS_KEY_ID, password = AWS_SECRET_ACCESS_KEY)
   }
 
   parameters {
-    choice(name: 'ACTION', choices: ['apply','destroy'], description: 'Choose action (apply to create, destroy to tear down)')
-    booleanParam(name: 'AUTO_APPROVE', defaultValue: false, description: 'If true, skip manual input confirmation (NOT recommended for demos)')
+    choice(name: 'ACTION', choices: ['plan','apply','destroy'], description: 'Choose pipeline action')
+    booleanParam(name: 'AUTO_APPROVE', defaultValue: false, description: 'If true skip interactive confirmation (not recommended for demos)')
   }
 
   stages {
     stage('Checkout') {
-      steps {
-        checkout scm
-      }
-    }
-
-    stage('Prepare') {
-      steps {
-        script {
-          // Adjust TF_DIR if your TF files are in a subfolder
-          // e.g. env.TF_DIR = "${env.WORKSPACE}/infra"
-          echo "Terraform dir: ${env.TF_DIR}"
-          echo "Running Terraform inside Docker? ${env.USE_DOCKER}"
-        }
-      }
+      steps { checkout scm }
     }
 
     stage('Init & Plan') {
       steps {
         withCredentials([usernamePassword(credentialsId: env.AWS_CREDS_ID, usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
           script {
+            // Init
             if (env.USE_DOCKER.toLowerCase() == 'true') {
-              // Run init/plan inside docker
-              sh label: 'Terraform init (docker)', script: """
+              sh """
                 docker run --rm -v ${env.WORKSPACE}:${env.WORKSPACE} -w ${env.TF_DIR} \\
                   -e AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} -e AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} \\
                   ${env.TERRAFORM_IMAGE} init -input=false
               """
-              if (params.ACTION == 'apply') {
-                sh label: 'Terraform plan (docker)', script: """
-                  docker run --rm -v ${env.WORKSPACE}:${env.WORKSPACE} -w ${env.TF_DIR} \\
-                    -e AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} -e AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} \\
-                    ${env.TERRAFORM_IMAGE} plan -out=tfplan -input=false
-                  docker run --rm -v ${env.WORKSPACE}:${env.WORKSPACE} -w ${env.TF_DIR} ${env.TERRAFORM_IMAGE} show -no-color tfplan > tfplan.txt || true
-                """
-              } else {
-                sh label: 'Terraform plan-destroy (docker)', script: """
-                  docker run --rm -v ${env.WORKSPACE}:${env.WORKSPACE} -w ${env.TF_DIR} \\
-                    -e AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} -e AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} \\
-                    ${env.TERRAFORM_IMAGE} plan -destroy -out=tfplan -input=false
-                  docker run --rm -v ${env.WORKSPACE}:${env.WORKSPACE} -w ${env.TF_DIR} ${env.TERRAFORM_IMAGE} show -no-color tfplan > tfplan.txt || true
-                """
-              }
             } else {
-              // Run init/plan on the Jenkins node (terraform must be installed)
-              sh label: 'Terraform init', script: """
+              sh """
                 export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
                 export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
                 cd ${env.TF_DIR}
                 terraform init -input=false
               """
-              if (params.ACTION == 'apply') {
-                sh label: 'Terraform plan', script: """
-                  export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-                  export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-                  cd ${env.TF_DIR}
-                  terraform plan -out=tfplan -input=false
-                  terraform show -no-color tfplan > tfplan.txt || true
+            }
+
+            // Plan (normal or destroy)
+            if (params.ACTION == 'destroy') {
+              if (env.USE_DOCKER.toLowerCase() == 'true') {
+                sh """
+                  docker run --rm -v ${env.WORKSPACE}:${env.WORKSPACE} -w ${env.TF_DIR} \\
+                    -e AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} -e AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} \\
+                    ${env.TERRAFORM_IMAGE} plan -destroy -out=tfplan -input=false
+                  docker run --rm -v ${env.WORKSPACE}:${env.WORKSPACE} -w ${env.TF_DIR} ${env.TERRAFORM_IMAGE} show -no-color tfplan > tfplan.txt || true
                 """
               } else {
-                sh label: 'Terraform plan destroy', script: """
+                sh """
                   export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
                   export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
                   cd ${env.TF_DIR}
@@ -85,11 +58,33 @@ pipeline {
                   terraform show -no-color tfplan > tfplan.txt || true
                 """
               }
+            } else {
+              // plan or apply (normal plan)
+              if (env.USE_DOCKER.toLowerCase() == 'true') {
+                sh """
+                  docker run --rm -v ${env.WORKSPACE}:${env.WORKSPACE} -w ${env.TF_DIR} \\
+                    -e AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} -e AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} \\
+                    ${env.TERRAFORM_IMAGE} plan -out=tfplan -input=false
+                  docker run --rm -v ${env.WORKSPACE}:${env.WORKSPACE} -w ${env.TF_DIR} ${env.TERRAFORM_IMAGE} show -no-color tfplan > tfplan.txt || true
+                """
+              } else {
+                sh """
+                  export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+                  export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+                  cd ${env.TF_DIR}
+                  terraform plan -out=tfplan -input=false
+                  terraform show -no-color tfplan > tfplan.txt || true
+                """
+              }
             }
 
-            // Publish the plan to the build console and archive for review
-            archiveArtifacts artifacts: '*/tfplan.txt', allowEmptyArchive: true
-            sh 'echo "===== Terraform plan preview ====="; sed -n \"1,200p\" ${env.TF_DIR}/tfplan.txt || true'
+            // Make sure tfplan.txt is in the workspace root so archiveArtifacts always finds it
+            sh "cp -f ${env.TF_DIR}/tfplan.txt ${env.WORKSPACE}/tfplan.txt || true"
+
+            // Archive and print a short preview
+            archiveArtifacts artifacts: 'tfplan.txt', allowEmptyArchive: true
+            echo "---- Plan preview (first 200 lines) ----"
+            sh "sed -n '1,200p' tfplan.txt || true"
           }
         }
       }
@@ -98,55 +93,39 @@ pipeline {
     stage('Confirm') {
       steps {
         script {
-          if (!params.AUTO_APPROVE.toBoolean()) {
-            // Require a human to confirm. Show action type
-            def actionPretty = params.ACTION == 'destroy' ? "DESTROY (will DELETE resources)" : "APPLY (will CREATE resources)"
-            input message: "Ready to ${actionPretty}? Click Proceed to continue", ok: "Proceed"
+          if (params.ACTION == 'plan') {
+            echo "Plan-only selected. No apply will be executed. Review archived tfplan.txt."
+          } else if (!params.AUTO_APPROVE.toBoolean()) {
+            def pretty = params.ACTION == 'destroy' ? "DESTROY (will DELETE resources)" : "APPLY (will CREATE/UPDATE resources)"
+            input message: "Ready to ${pretty}? Click Proceed to continue", ok: "Proceed"
           } else {
-            echo "AUTO_APPROVE enabled — proceeding without manual confirmation (not recommended for production)"
+            echo "AUTO_APPROVE enabled — proceeding without human confirmation"
           }
         }
       }
     }
 
-    stage('Apply/Destroy') {
+    stage('Execute') {
+      when { expression { params.ACTION != 'plan' } } // skip for plan-only
       steps {
         withCredentials([usernamePassword(credentialsId: env.AWS_CREDS_ID, usernameVariable: 'AWS_ACCESS_KEY_ID', passwordVariable: 'AWS_SECRET_ACCESS_KEY')]) {
           script {
             if (env.USE_DOCKER.toLowerCase() == 'true') {
-              // Use container to apply/destroy
-              if (params.ACTION == 'apply') {
-                sh label: 'Terraform apply (docker)', script: """
-                  docker run --rm -v ${env.WORKSPACE}:${env.WORKSPACE} -w ${env.TF_DIR} \\
-                    -e AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} -e AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} \\
-                    ${env.TERRAFORM_IMAGE} apply -input=false -auto-approve tfplan
-                """
-              } else {
-                sh label: 'Terraform destroy (docker)', script: """
-                  docker run --rm -v ${env.WORKSPACE}:${env.WORKSPACE} -w ${env.TF_DIR} \\
-                    -e AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} -e AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} \\
-                    ${env.TERRAFORM_IMAGE} apply -input=false -auto-approve tfplan
-                """
-              }
+              sh """
+                docker run --rm -v ${env.WORKSPACE}:${env.WORKSPACE} -w ${env.TF_DIR} \\
+                  -e AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} -e AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} \\
+                  ${env.TERRAFORM_IMAGE} apply -input=false -auto-approve tfplan
+              """
             } else {
-              if (params.ACTION == 'apply') {
-                sh label: 'Terraform apply', script: """
-                  export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-                  export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-                  cd ${env.TF_DIR}
-                  terraform apply -input=false -auto-approve tfplan
-                """
-              } else {
-                sh label: 'Terraform destroy', script: """
-                  export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-                  export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-                  cd ${env.TF_DIR}
-                  terraform apply -input=false -auto-approve tfplan
-                """
-              }
+              sh """
+                export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+                export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+                cd ${env.TF_DIR}
+                terraform apply -input=false -auto-approve tfplan
+              """
             }
 
-            // Show outputs if apply succeeded
+            // show outputs only for apply
             if (params.ACTION == 'apply') {
               if (env.USE_DOCKER.toLowerCase() == 'true') {
                 sh "docker run --rm -v ${env.WORKSPACE}:${env.WORKSPACE} -w ${env.TF_DIR} ${env.TERRAFORM_IMAGE} output -no-color || true"
@@ -161,22 +140,11 @@ pipeline {
   }
 
   post {
-    success {
-      script {
-        if (params.ACTION == 'apply') {
-          echo "Terraform apply finished successfully."
-        } else {
-          echo "Terraform destroy finished successfully."
-        }
-      }
-    }
-    failure {
-      echo "Terraform step failed - check console output for errors."
-    }
     always {
-      // cleanup plan file if present
+      archiveArtifacts artifacts: 'tfplan.txt', allowEmptyArchive: true
       sh "rm -f ${env.TF_DIR}/tfplan || true"
-      archiveArtifacts artifacts: "${env.TF_DIR}/tfplan.txt", allowEmptyArchive: true
     }
+    success { echo "Pipeline finished for ACTION=${params.ACTION}" }
+    failure { echo "Pipeline failed - check console logs" }
   }
 }
